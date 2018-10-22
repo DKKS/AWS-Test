@@ -1,0 +1,146 @@
+---
+  - name: Provision an EC2 Instance
+    hosts: local
+    connection: local
+    gather_facts: No
+    tags: AWS Test - Deepak Kumar S
+
+    ## Variables used to provision EC2 Instance
+    vars:
+      instance_type: t2.micro
+      image: ami-07a3bd4944eb120a0 ## AMI for Ubuntu Server 18.04 LTS 
+
+      security_group: dks-webserver ## My security group
+      keypair: dks-key ## My key on AWS
+
+      region: ap-southeast-2 ## Australia Sydney
+      count: 1
+
+    # Task that will be used to Launch/Create an EC2 Instance
+    tasks:
+
+      - name: Create a security group
+        local_action:
+          module: ec2_group
+          name: "{{ security_group }}"
+          description: Security Group for webserver Servers
+          region: "{{ region }}"
+          rules:
+            - proto: tcp
+              from_port: 22
+              to_port: 22
+              cidr_ip: 0.0.0.0/0
+            - proto: tcp
+              from_port: 80
+              to_port: 80
+              cidr_ip: 0.0.0.0/0
+            - proto: tcp
+              from_port: 443
+              to_port: 443
+              cidr_ip: 0.0.0.0/0
+          rules_egress:
+            - proto: all
+              cidr_ip: 0.0.0.0/0
+        register: basic_firewall
+
+      - name: Launch the new EC2 Instance
+        local_action: ec2
+                      group={{ security_group }}
+                      instance_type={{ instance_type}}
+                      image={{ image }}
+                      wait=true
+                      region={{ region }}
+                      keypair={{ keypair }}
+                      count={{ count }}
+        register: ec2
+
+      - name: Add the newly created EC2 instance(s) to the local host group (located inside the directory)
+        lineinfile:   dest="./hosts"
+                      regexp={{ item.public_ip }}
+                      insertafter="[webserver]" 
+                      line="{{ item['public_ip'] }} ansible_connection=ssh ansible_ssh_user=ubuntu ansible_ssh_private_key_file=/Users/deepakks/Documents/AWS/dks-key.pem"
+                      state=present
+        with_items: "{{ ec2.instances }}"
+
+      - name: Wait for SSH to come up
+        local_action: wait_for
+                      host={{ item.public_ip }}
+                      port=22
+                      state=started
+        with_items: "{{ ec2.instances }}"
+      
+      - name: Add tag to Instance(s)
+        local_action: ec2_tag resource={{ item.id }} region={{ region }} state=present
+        with_items: "{{ ec2.instances }}"
+        args:
+          tags:
+            Name: webserver
+      - name: Wait for SSH to come up
+        wait_for:
+          host: "{{ item.public_ip }}"
+          port: 22
+          state: started
+        with_items: "{{ ec2.instances }}"
+      - name: Refresh inventory
+        meta: refresh_inventory
+
+  - name: Install python on webserver
+    hosts: webserver
+    remote_user: ubuntu
+    become: yes
+    gather_facts: no
+    tasks:
+      - name: install python 2
+        raw: test -e /usr/bin/python || (apt -y update && apt install -y python-minimal)
+      - name: Getting the Ansible facts variable
+        setup:
+        register: ansible_facts_vars
+      - name: Install prerequisites
+        apt: name={{item}} update_cache=yes
+        with_items:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - python-pip
+      - name: Add Docker GPG key
+        apt_key: url=https://download.docker.com/linux/ubuntu/gpg
+      - name: Add Docker APT repository
+        apt_repository:
+          repo: deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_facts_vars.ansible_facts.ansible_distribution_release }} stable
+      - name: Install Docker
+        apt: name=docker-ce
+      - name: Install nginx container
+        command: docker run -d -p 80:80 --name dksnginx1 nginx
+
+      - name: Checking Healthcheck of Nginx
+        shell: docker inspect dksnginx1
+        args:
+          executable: /bin/bash
+        register: nginx_status
+      - set_fact:
+          nginx: "{{ nginx_status.stdout | from_json }}"
+      - name: healtcheck status
+        debug: msg="Nginx container is {{ nginx.0['State']['Status'] }}"
+      - name: Installing Python Dependencies
+        command: "{{ item }}"
+        with_items:
+             - "pip install requests"
+             - "pip install bs4"
+      - name: Copy scripts to ec2 instance
+        copy: 
+          src: "{{ item.src }}"
+          dest: "{{ item.dest }}"
+          remote_src: no
+          mode: 0755
+        with_items:
+         - { src: '/Users/deepakks/Documents/AWS/docker-stats.sh', dest: '~/docker-stats.sh' }
+         - { src: '/Users/deepakks/Documents/AWS/mostComonWords.py', dest: '~/mostComonWords.py' }
+      - name: Running the shell and python script
+        shell: "{{ item }}"
+        args:
+          executable: /bin/bash
+        with_items:
+          - "python ~/mostComonWords.py http://{{ inventory_hostname }} > ~/mostComonWords.txt"
+          - "sh ~/docker-stats.sh"
+      
