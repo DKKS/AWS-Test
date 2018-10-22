@@ -8,8 +8,8 @@ Command to execute:
  
 
 On the EC2 instance:
-#This key should replaced by your own key
 
+#This key should replaced by your own key
 2. ssh -i <dks-key.pem> ubuntu@<ipaddress>
 
 3. sudo su -
